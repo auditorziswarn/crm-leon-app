@@ -148,6 +148,10 @@ const AJ = ['Alto', 'Medio-Alto', 'Medio', 'Medio-Bajo', 'Bajo'];
 const ajuste = m => (X.fichas[m.Marca] || {}).ajuste;
 const ajTag = a => a ? `<span class="tag aj-${a}">Ajuste ${esc(a)}</span>` : '';
 const sucDe = m => X.sucursales[m.Marca] || [];
+const nacDe = m => (X.nacional || {})[m.Marca];
+const nacHtml = m => { const n = nacDe(m); return n ? `<div class="card nohover"><div class="row"><span class="nm">Presencia nacional</span><span class="tag">${esc(n.alcance)}</span></div>
+  <div class="kv"><b>Sucursales en México:</b> ${esc(n.total_nacional)} <span class="mut">(${esc(n.confianza)})</span></div><div class="kv"><b>Cobertura:</b> ${esc(n.cobertura)}</div>
+  ${n.nota ? `<div class="mut">${esc(n.nota)}</div>` : ''}${n.fuente_url ? `<div class="kv">${inline(n.fuente_url)}</div>` : ''}</div>` : ''; };
 
 // ---- vistas ----
 function head() { $('#sub').textContent = `${D.marcas.length} marcas · ${D.marcas.filter(m => m.Estado !== 'Sin contactar').length} trabajadas`; document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.v === view)); }
@@ -231,6 +235,7 @@ function vPanorama() {
   <h3>Estado del embudo</h3>${bar(cnt(m => m.Estado), 'est')}
   <h3>Giro (top 12)</h3>${bar(cnt(m => m.Giro).slice(0, 12), 'q')}
   <h3>Tipo de negocio</h3>${bar(fr.slice(0, 8))}
+  <h3>Alcance de la marca (nacional)</h3>${bar(cnt(m => (nacDe(m) || {}).alcance || 'Sin dato'))}
   <h3>Pedidos propios hoy</h3>${bar(propios)}
   <h3>Calificación Uber Eats (mejor sucursal)</h3>${bar(bajoUE)}
   <h3>Calidad de los datos</h3>${bar(ver)}
@@ -279,15 +284,15 @@ function render() {
 function fichaHtml(m) {
   const f = X.fichas[m.Marca];
   if (!f) return '<p class="mut">Esta marca todavía no tiene ficha de investigación.</p>';
-  const abiertas = /ejecutiva|contactos|ajuste/i;
+  const abiertas = /ejecutiva|contactos|ajuste|nacional/i;
   return `<p class="mut">Investigación del 17 nov 2026 (${esc(f.slug)}.md). Lo marcado "por verificar" no está confirmado.</p>` +
     f.secciones.filter(s => s.md).map(s => `<details ${abiertas.test(s.t) ? 'open' : ''}><summary>${esc(s.t)}</summary>${md(s.md)}</details>`).join('');
 }
 function sucHtml(m) {
   const rows = sucDe(m);
-  if (!rows.length) return '<p class="mut">Sin filas de Uber Eats para esta marca.</p>';
+  if (!rows.length) return nacHtml(m) + '<p class="mut">Sin filas de Uber Eats para esta marca.</p>';
   const shown = ['#', 'Negocio', 'Marca (agrupada)', 'Dirección', 'CP', 'Tel.', 'Calif. Uber Eats', 'N° calif. Uber Eats', 'Categorías Uber Eats', 'Precio', 'Ficha Uber Eats'];
-  return `<p class="mut">${rows.length} ficha${rows.length > 1 ? 's' : ''} en Uber Eats (captura 12 nov). Los horarios y sucursales completas están en la pestaña Ficha.</p>` + rows.map(s => {
+  return nacHtml(m) + `<p class="mut">${rows.length} ficha${rows.length > 1 ? 's' : ''} en Uber Eats (captura 12 nov). Los horarios y sucursales completas están en la pestaña Ficha.</p>` + rows.map(s => {
     const dir = s['Dirección'], tel = phones(s['Tel.'])[0];
     const otros = Object.entries(s).filter(([k, v]) => !shown.includes(k) && v !== undefined);
     return `<div class="card nohover"><div class="row"><span class="nm">${esc(s.Negocio)}</span>${s['Calif. Uber Eats'] ? `<span class="tag">★ ${esc(s['Calif. Uber Eats'])} (${esc(s['N° calif. Uber Eats'] || '?')})</span>` : ''}</div>
