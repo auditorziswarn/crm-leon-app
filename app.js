@@ -22,28 +22,95 @@ const cargaExtra = async () => {
 function aplicaRespaldo(d) {
   if (!d.marcas || !d.listas) throw 0;
   if (d.extra) { X = d.extra; guardaExtra(); delete d.extra; }
-  D = d; persist();
+  if (d.cfg) { CFG.pl = { ...CFG.pl, ...d.cfg.pl }; CFG.cuota = d.cfg.cuota || CFG.cuota; CFG.yo = d.cfg.yo ?? CFG.yo; saveCfg(); delete d.cfg; }
+  D = d; persist(); respaldado();
 }
 
 let D, view = 'hoy', F = { q: '', pri: '', est: '', aj: '' }, tabF = 'seg';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const hoy = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
-const persist = () => store.save(D);
+// ---- configuración (cadencias, plantillas, cuota diaria) ----
+const KEYC = 'crm-leon-cfg', KEYP = 'crm-leon-pend';
+const CFG0 = {
+  cuota: 8, yo: '',
+  dias: { 'Contactado': 3, 'Respondió': 2, 'Demo agendada': 1, 'Demo realizada': 2, 'Propuesta': 3 },
+  acc: { 'Contactado': 'Dar seguimiento (sin respuesta)', 'Respondió': 'Responder y proponer una demo', 'Demo agendada': 'Confirmar / hacer la demo', 'Demo realizada': 'Preguntar cómo les pareció y proponer siguiente paso', 'Propuesta': 'Dar seguimiento a la propuesta' },
+  pl: {
+    ini: 'Hola, buen día. Le escribe {resp} de DeliPROPIO. Ayudamos a restaurantes como {marca} a recibir pedidos directos con su propia marca, sin depender solo de las apps. ¿Le puedo compartir un video corto de 1 minuto?',
+    seg: 'Hola, buen día. Le escribo de nuevo de DeliPROPIO para dar seguimiento sobre {marca}. ¿Pudo ver la información que le compartí? Quedo atento.',
+    asu: 'DeliPROPIO para {marca}: pedidos directos con su propia marca'
+  }
+};
+let CFG;
+try { const c = JSON.parse(localStorage.getItem(KEYC) || '{}'); CFG = { ...CFG0, ...c, dias: { ...CFG0.dias, ...c.dias }, acc: { ...CFG0.acc, ...c.acc }, pl: { ...CFG0.pl, ...c.pl } }; }
+catch (e) { CFG = JSON.parse(JSON.stringify(CFG0)); }
+const saveCfg = () => { try { localStorage.setItem(KEYC, JSON.stringify(CFG)); } catch (e) {} };
+const persist = () => { store.save(D); CFG.cambios = (CFG.cambios || 0) + 1; saveCfg(); };
+const addDays = n => { const d = new Date(); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const CERRADO = ['Cliente', 'Perdido', 'No contactar'];
 
 // ---- helpers de contacto ----
 const phones = s => (String(s ?? '').match(/\+?\d[\d\s-]{8,}\d/g) || []).map(p => p.replace(/[\s-]/g, ''));
 const norm = p => { p = p.replace(/^\+/, ''); if (p.length === 10) p = '52' + p; return p; };
 const emails = s => String(s ?? '').match(/[\w.+-]+@[\w-]+\.[\w.-]+/g) || [];
 const urls = s => String(s ?? '').match(/https?:\/\/[^\s|)]+/g) || [];
+const telDe = m => phones(m.WhatsApp)[0] || phones(m['Teléfono'])[0] || null;
+const mailDe = m => emails(m.Correo)[0] || emails(m['Contacto de franquicias'])[0] || null;
+const rellena = (t, m) => t.replace(/\{marca\}/g, m.Marca).replace(/\{giro\}/g, m.Giro || '').replace(/\{resp\}/g, CFG.yo || m.Responsable || 'el equipo');
+const msg = (m, k) => rellena(CFG.pl[k || (m.Estado === 'Sin contactar' ? 'ini' : 'seg')], m);
+
+// Fija la próxima acción según el estado (respeta una fecha futura puesta a mano)
+function programa(m, force) {
+  if (CERRADO.includes(m.Estado)) { m['Próxima acción'] = null; m['Fecha próxima acción'] = null; return; }
+  if (m.Estado === 'Sin contactar') return;
+  const fp = m['Fecha próxima acción'];
+  if (!force && fp && fp > hoy()) return;
+  const n = D.bitacora.filter(x => x.Marca === m.Marca).length;
+  if (m.Estado === 'Contactado' && n >= 3) { m['Próxima acción'] = 'Último intento; si no responde, pasar a Perdido o pausar'; m['Fecha próxima acción'] = addDays(7); }
+  else { m['Próxima acción'] = CFG.acc[m.Estado] || 'Dar seguimiento'; m['Fecha próxima acción'] = addDays(CFG.dias[m.Estado] || 3); }
+  m._mod = Date.now();
+}
+function registra(m, canal, txt) {
+  const f = hoy();
+  if (m.Estado === 'Sin contactar') m.Estado = 'Contactado';
+  m['Canal usado'] = canal || m['Canal usado']; m['Primer contacto'] = m['Primer contacto'] || f; m['Último contacto'] = f;
+  const e = { Fecha: f, Marca: m.Marca, Responsable: m.Responsable, Canal: canal || null, 'Qué se hizo / qué dijeron': txt, 'Estado resultante': m.Estado, 'Siguiente paso': null, _t: Date.now() };
+  D.bitacora.push(e);
+  programa(m, false);
+  e['Siguiente paso'] = m['Próxima acción'];
+  m._mod = Date.now(); persist();
+}
+// Envío con mensaje prellenado; al volver a la app se pregunta si se envió y se registra solo
+function enviar(m, via, texto, dest) {
+  const t = texto || msg(m);
+  if (via === 'wa') {
+    const p = dest || telDe(m); if (!p) return alert('Esta marca no tiene teléfono registrado.');
+    localStorage.setItem(KEYP, JSON.stringify({ id: m['#'], canal: 'WhatsApp', txt: t }));
+    window.open(`https://wa.me/${norm(p)}?text=${encodeURIComponent(t)}`, '_blank');
+  } else {
+    const c = dest || mailDe(m); if (!c) return alert('Esta marca no tiene correo registrado.');
+    localStorage.setItem(KEYP, JSON.stringify({ id: m['#'], canal: 'Correo', txt: t }));
+    location.href = `mailto:${c}?subject=${encodeURIComponent(rellena(CFG.pl.asu, m))}&body=${encodeURIComponent(t)}`;
+  }
+  pintaPend();
+}
+const pendiente = () => { try { return JSON.parse(localStorage.getItem(KEYP) || 'null'); } catch (e) { return null; } };
+function pintaPend() {
+  const b = $('#pend'), p = pendiente();
+  const m = p && D && D.marcas.find(x => x['#'] == p.id);
+  if (!m) { b.hidden = true; return; }
+  b.hidden = false;
+  b.innerHTML = `<span>¿Enviaste el ${p.canal === 'Correo' ? 'correo' : 'WhatsApp'} a <b>${esc(m.Marca)}</b>?</span><button class="b" data-pend="si">Sí, registrar</button><button class="b g" data-pend="no">No</button>`;
+}
 
 function acciones(m) {
   const out = [];
   const wa = phones(m['WhatsApp']);
   const tel = phones(m['Teléfono']);
-  new Set([...wa, ...(wa.length ? [] : tel)]).forEach(p => out.push(`<a class="wa" href="https://wa.me/${norm(p)}" target="_blank">WhatsApp ${esc(p)}</a>`));
+  new Set([...wa, ...(wa.length ? [] : tel)]).forEach(p => out.push(`<a class="wa" href="#" data-send="wa" data-id="${m['#']}" data-p="${p}">WhatsApp ${esc(p)}</a>`));
   new Set(tel).forEach(p => out.push(`<a href="tel:${p}">Llamar ${esc(p)}</a>`));
-  new Set([...emails(m['Correo']), ...emails(m['Contacto de franquicias'])]).forEach(c => out.push(`<a href="mailto:${c}">${esc(c)}</a>`));
+  new Set([...emails(m['Correo']), ...emails(m['Contacto de franquicias'])]).forEach(c => out.push(`<a href="#" data-send="mail" data-id="${m['#']}" data-p="${c}">${esc(c)}</a>`));
   urls(m['Formulario / contacto web']).forEach(u => out.push(`<a href="${u}" target="_blank">Formulario / web</a>`));
   [['Sitio web', 'Sitio'], ['Instagram', 'Instagram'], ['Facebook', 'Facebook']].forEach(([k, t]) => urls(m[k]).slice(0, 1).forEach(u => out.push(`<a href="${u}" target="_blank">${t}</a>`)));
   return out.join('') || '<span class="mut">Sin contacto directo registrado</span>';
@@ -86,22 +153,38 @@ const sucDe = m => X.sucursales[m.Marca] || [];
 function head() { $('#sub').textContent = `${D.marcas.length} marcas · ${D.marcas.filter(m => m.Estado !== 'Sin contactar').length} trabajadas`; document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.v === view)); }
 const prioN = { Alta: 0, Media: 1, Baja: 2 };
 
-function cardHtml(m) {
+function cardHtml(m, q) {
   const late = m['Fecha próxima acción'] && m['Fecha próxima acción'] < hoy();
   const ns = sucDe(m).length, tf = X.fichas[m.Marca];
   return `<div class="card" data-id="${m['#']}"><div class="row"><span class="nm">${esc(m.Marca)}</span><span>${ajTag(ajuste(m))}<span class="tag ${m.Prioridad}">${esc(m.Prioridad)}</span></span></div>
   <div class="mut">${esc(m.Giro)} · ${esc(m.Estado)}${m.Responsable ? ' · ' + esc(m.Responsable) : ''}${ns ? ` · ${ns} ficha${ns > 1 ? 's' : ''} Uber Eats` : ''}${tf ? ' · con ficha' : ''}</div>
-  ${m['Próxima acción'] ? `<div class="${late ? 'late' : 'mut'}">➜ ${esc(m['Próxima acción'])} ${esc(m['Fecha próxima acción'] || '')}</div>` : ''}</div>`;
+  ${m['Próxima acción'] ? `<div class="${late ? 'late' : 'mut'}">➜ ${esc(m['Próxima acción'])} ${esc(m['Fecha próxima acción'] || '')}</div>` : ''}${q ? quick(m, q) : ''}</div>`;
 }
 
+function quick(m, q) {
+  const id = m['#'], b = [];
+  if (telDe(m)) b.push(`<button class="b g" data-send="wa" data-id="${id}">WhatsApp</button>`);
+  else if (mailDe(m)) b.push(`<button class="b g" data-send="mail" data-id="${id}">Correo</button>`);
+  if (q === 'act') [1, 3, 7].forEach(d => b.push(`<button class="b g sn" data-id="${id}" data-d="${d}">+${d} d</button>`));
+  return b.length ? `<div class="acts qk">${b.join('')}</div>` : '';
+}
+const ajRank = m => { const i = AJ.indexOf(ajuste(m)); return i < 0 ? 9 : i; };
 function vHoy() {
   const t = hoy();
-  const act = D.marcas.filter(m => m['Fecha próxima acción'] && m['Fecha próxima acción'] <= t && !['Cliente', 'Perdido', 'No contactar'].includes(m.Estado))
+  const act = D.marcas.filter(m => m['Fecha próxima acción'] && m['Fecha próxima acción'] <= t && !CERRADO.includes(m.Estado))
     .sort((a, b) => a['Fecha próxima acción'].localeCompare(b['Fecha próxima acción']));
+  const sinProg = D.marcas.filter(m => !['Sin contactar', ...CERRADO].includes(m.Estado) && !m['Fecha próxima acción']);
   const nuevos = D.marcas.filter(m => m.Estado === 'Sin contactar' && !m['Fecha próxima acción'])
-    .sort((a, b) => prioN[a.Prioridad] - prioN[b.Prioridad] || a['#'] - b['#']).slice(0, 8);
-  return `<h3>Seguimientos pendientes (${act.length})</h3>${act.map(cardHtml).join('') || '<p class="mut">Nada vencido. Registra un contacto y fija su próxima acción.</p>'}
-  <h3>Siguientes por contactar</h3>${nuevos.map(cardHtml).join('')}`;
+    .sort((a, b) => ajRank(a) - ajRank(b) || prioN[a.Prioridad] - prioN[b.Prioridad] || a['#'] - b['#']);
+  const hechos = D.bitacora.filter(x => x.Fecha === t).length, cuota = CFG.cuota;
+  const dias = CFG.ult ? Math.floor((new Date(t) - new Date(CFG.ult)) / 864e5) : null;
+  const aviso = (CFG.cambios || 0) > 0 && (dias === null || dias >= 3 || CFG.cambios >= 15)
+    ? `<div class="card nohover aviso">Tienes <b>${CFG.cambios}</b> cambios sin respaldar${dias === null ? '' : ` (último respaldo hace ${dias} d)`}. <button class="b" id="shr0">Compartir respaldo</button></div>` : '';
+  return `${aviso}<div class="card nohover"><div class="row"><b>Hoy</b><span class="mut">${hechos} de ${cuota} contactos</span></div>
+  <div class="bt"><i style="width:${Math.min(100, hechos / cuota * 100)}%"></i></div></div>
+  <h3>Seguimientos pendientes (${act.length})</h3>${act.map(m => cardHtml(m, 'act')).join('') || '<p class="mut">Nada vencido. Registra un contacto y la app agenda el siguiente sola.</p>'}
+  ${sinProg.length ? `<h3>Sin próxima acción (${sinProg.length})</h3><p class="mut">Marcas ya contactadas que no tienen fecha de seguimiento.</p><button class="b" id="prog">Programar seguimientos automáticamente</button>${sinProg.slice(0, 6).map(m => cardHtml(m)).join('')}` : ''}
+  <h3>Siguientes por contactar (${Math.min(cuota, nuevos.length)} de ${nuevos.length})</h3><p class="mut">Ordenadas por ajuste con DeliPROPIO y prioridad.</p>${nuevos.slice(0, cuota).map(m => cardHtml(m, 'new')).join('')}`;
 }
 
 function vCartera() {
@@ -162,8 +245,19 @@ function vBitacora() {
 }
 
 function vAjustes() {
-  return `<h3>Respaldo</h3><p class="mut">Todo vive en este navegador. Descarga un respaldo seguido.</p>
-  <div class="acts"><button class="b" id="exj">Descargar respaldo (.json)</button><button class="b g" id="exc">Exportar cartera (.csv para Excel)</button></div>
+  const dias = CFG.ult ? Math.floor((new Date(hoy()) - new Date(CFG.ult)) / 864e5) : null;
+  return `<h3>Respaldo y sincronización</h3>
+  <p class="mut">Todo vive en este dispositivo. Último respaldo: ${CFG.ult ? `${CFG.ult} (hace ${dias} d)` : 'nunca'} · ${CFG.cambios || 0} cambios desde entonces.</p>
+  <div class="acts"><button class="b" id="shr">Compartir respaldo (WhatsApp, Drive…)</button><button class="b g" id="exj">Descargar respaldo (.json)</button><button class="b g" id="exc">Exportar cartera (.csv)</button></div>
+  <h3>Combinar con el respaldo de otro dispositivo</h3><input type="file" id="mrg" accept=".json"><p class="mut">No borra nada: por cada marca se queda la versión más reciente y se suman los contactos de la bitácora de ambos.</p>
+  <h3>Seguimiento y mensajes</h3>
+  <label>Quién escribe (para {resp})</label><select id="c-yo">${sel(D.listas.Responsable, CFG.yo)}</select>
+  <label>Contactos nuevos por día</label><input type="number" id="c-cuota" min="1" max="50" value="${CFG.cuota}">
+  <label>Primer mensaje ({marca} {giro} {resp})</label><textarea id="c-ini" rows="4">${esc(CFG.pl.ini)}</textarea>
+  <label>Mensaje de seguimiento</label><textarea id="c-seg" rows="3">${esc(CFG.pl.seg)}</textarea>
+  <label>Asunto del correo</label><input id="c-asu" value="${esc(CFG.pl.asu)}">
+  <button class="b" id="c-sv" style="margin-top:8px">Guardar</button>
+  <p class="mut">Cadencia automática tras cada contacto: ${Object.entries(CFG.dias).map(([k, v]) => `${k} +${v} d`).join(' · ')}. A los 3 intentos sin respuesta propone un último intento a 7 días.</p>
   <h3>Restaurar</h3><input type="file" id="imp" accept=".json"><p class="mut">Reemplaza todo lo actual con el respaldo elegido.</p>
   <h3>Volver al Excel original</h3><button class="b g" id="rst">Borrar cambios y recargar semilla</button>`;
 }
@@ -220,6 +314,8 @@ function ficha(id) {
   <div class="pn" data-p="fic" ${tabF === 'fic' ? '' : 'hidden'}>${fichaHtml(m)}</div>
   <div class="pn" data-p="suc" ${tabF === 'suc' ? '' : 'hidden'}>${sucHtml(m)}</div>
   <div class="pn" data-p="seg" ${tabF === 'seg' ? '' : 'hidden'}>
+  <h3>Mensaje sugerido</h3><textarea id="r-msg" rows="4">${esc(msg(m))}</textarea>
+  <div class="mut">Los botones WhatsApp / correo de arriba llevan este texto (puedes editarlo aquí). Al volver a la app te pregunto si lo enviaste y lo registro solo.</div>
   <h3>Seguimiento</h3>
   <label>Estado</label><select id="f-est">${sel(L.Estado, m.Estado)}</select>
   <label>Prioridad</label><select id="f-pri">${sel(L.Prioridad, m.Prioridad)}</select>
@@ -243,23 +339,53 @@ function ficha(id) {
     m['Próxima acción'] = $('#f-pa').value || null; m['Fecha próxima acción'] = $('#f-fpa').value || null; m['Notas / resultado'] = $('#f-n').value || null;
   };
   $('#cl').onclick = () => { $('#sheet').hidden = true; render(); };
-  $('#sv').onclick = () => { leer(); persist(); $('#sheet').hidden = true; render(); };
+  $('#sv').onclick = () => { leer(); m._mod = Date.now(); persist(); $('#sheet').hidden = true; render(); };
   $('#rg').onclick = () => {
     const txt = $('#r-txt').value.trim(); if (!txt) return alert('Escribe qué se hizo o qué dijeron.');
-    leer(); if (m.Estado === 'Sin contactar') { m.Estado = 'Contactado'; }
-    const can = $('#r-can').value || null, f = hoy();
-    m['Canal usado'] = can || m['Canal usado']; m['Primer contacto'] = m['Primer contacto'] || f; m['Último contacto'] = f;
-    D.bitacora.push({ Fecha: f, Marca: m.Marca, Responsable: m.Responsable, Canal: can, 'Qué se hizo / qué dijeron': txt, 'Estado resultante': m.Estado, 'Siguiente paso': m['Próxima acción'] });
-    persist(); ficha(id);
+    leer(); registra(m, $('#r-can').value || null, txt); ficha(id);
   };
 }
 
 // ---- datos ----
+const paquete = () => JSON.stringify({ ...D, extra: X, cfg: { pl: CFG.pl, cuota: CFG.cuota, yo: CFG.yo } });
+const respaldado = () => { CFG.ult = hoy(); CFG.cambios = 0; saveCfg(); };
+async function comparte() {
+  const f = new File([paquete()], `crm-leon-respaldo-${hoy()}.json`, { type: 'application/json' });
+  if (navigator.canShare && navigator.canShare({ files: [f] })) {
+    try { await navigator.share({ files: [f], title: 'Respaldo CRM León' }); respaldado(); render(); return; }
+    catch (e) { if (e.name === 'AbortError') return; }
+  }
+  descarga(f.name, await f.text(), 'application/json'); respaldado(); render();
+}
+function combina(o) {
+  if (!o.marcas || !o.listas) throw 0;
+  let nuevas = 0, act = 0, bit = 0;
+  const mine = new Map(D.marcas.map(m => [m['#'], m]));
+  o.marcas.forEach(m => {
+    const a = mine.get(m['#']);
+    if (!a) { D.marcas.push(m); nuevas++; }
+    else if ((m._mod || 0) > (a._mod || 0)) { D.marcas[D.marcas.indexOf(a)] = m; act++; }
+  });
+  const k = x => [x.Fecha, x.Marca, x.Canal, x['Qué se hizo / qué dijeron']].join('|'), have = new Set(D.bitacora.map(k));
+  (o.bitacora || []).forEach(x => { if (!have.has(k(x))) { D.bitacora.push(x); have.add(k(x)); bit++; } });
+  D.bitacora.sort((a, b) => String(a.Fecha).localeCompare(String(b.Fecha)));
+  if (o.extra && Object.keys(o.extra.fichas || {}).length > Object.keys(X.fichas).length) { X = o.extra; guardaExtra(); }
+  persist(); return { nuevas, act, bit };
+}
 function descarga(nombre, texto, tipo) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([texto], { type: tipo })); a.download = nombre; a.click();
 }
 function ajustes() {
-  $('#exj').onclick = () => descarga(`crm-leon-respaldo-${hoy()}.json`, JSON.stringify({ ...D, extra: X }), 'application/json');
+  $('#exj').onclick = () => { descarga(`crm-leon-respaldo-${hoy()}.json`, paquete(), 'application/json'); respaldado(); render(); };
+  $('#shr').onclick = comparte;
+  $('#mrg').onchange = async e => {
+    try { const r = combina(JSON.parse(await e.target.files[0].text())); alert(`Combinado: ${r.nuevas} marcas nuevas, ${r.act} actualizadas, ${r.bit} contactos agregados a la bitácora.`); render(); }
+    catch { alert('Archivo de respaldo no válido.'); }
+  };
+  $('#c-sv').onclick = () => {
+    CFG.yo = $('#c-yo').value; CFG.cuota = Math.max(1, Math.min(50, +$('#c-cuota').value || 8));
+    CFG.pl = { ini: $('#c-ini').value, seg: $('#c-seg').value, asu: $('#c-asu').value }; saveCfg(); alert('Guardado.');
+  };
   $('#exc').onclick = () => {
     const cols = [...new Set(D.marcas.flatMap(Object.keys))], c = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
     descarga(`crm-leon-${hoy()}.csv`, '﻿' + [cols.map(c).join(','), ...D.marcas.map(m => cols.map(k => c(m[k])).join(','))].join('\r\n'), 'text/csv');
@@ -272,6 +398,21 @@ function ajustes() {
 }
 
 document.addEventListener('click', e => {
+  const sd = e.target.closest('[data-send]');
+  if (sd) {
+    e.preventDefault(); const m = D.marcas.find(x => x['#'] == sd.dataset.id), ta = $('#r-msg');
+    return m && enviar(m, sd.dataset.send, !$('#sheet').hidden && ta ? ta.value : null, sd.dataset.p);
+  }
+  const pd = e.target.closest('[data-pend]');
+  if (pd) {
+    const p = pendiente(); localStorage.removeItem(KEYP); const m = p && D.marcas.find(x => x['#'] == p.id);
+    if (pd.dataset.pend === 'si' && m) registra(m, p.canal, 'Mensaje enviado: ' + p.txt);
+    pintaPend(); if ($('#sheet').hidden) render(); else if (m) ficha(m['#']); return;
+  }
+  const sn = e.target.closest('.sn');
+  if (sn) { const m = D.marcas.find(x => x['#'] == sn.dataset.id); m['Fecha próxima acción'] = addDays(+sn.dataset.d); m._mod = Date.now(); persist(); return render(); }
+  if (e.target.closest('#prog')) { let n = 0; D.marcas.forEach(m => { if (!['Sin contactar', ...CERRADO].includes(m.Estado) && !m['Fecha próxima acción']) { programa(m, true); n++; } }); persist(); alert(`${n} marcas programadas.`); return render(); }
+  if (e.target.closest('#shr0')) return comparte();
   const cp = e.target.closest('.cp');
   if (cp) { const t = cp.dataset.t, ok = () => { cp.textContent = '¡Copiado!'; setTimeout(() => cp.textContent = 'Copiar', 1500); };
     return (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(ok, () => { const a = document.createElement('textarea'); a.value = t; document.body.append(a); a.select(); document.execCommand('copy'); a.remove(); ok(); }); }
@@ -291,4 +432,5 @@ function vacio() {
     catch { alert('Archivo de respaldo no válido.'); }
   };
 }
-Promise.all([store.load(), cargaExtra()]).then(([d]) => { D = d; D ? render() : vacio(); });
+Promise.all([store.load(), cargaExtra()]).then(([d]) => { D = d; D ? render() : vacio(); pintaPend(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden && D) pintaPend(); });
