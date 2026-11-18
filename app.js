@@ -305,6 +305,7 @@ function sucHtml(m) {
 
 // ---- ficha ----
 const sel = (arr, v) => `<option value=""></option>` + arr.map(x => `<option ${x === v ? 'selected' : ''}>${esc(x)}</option>`).join('');
+const sucLeon = v => { v = String(v ?? '').trim(); if (!v || /^n\/?d/i.test(v)) return ''; return /^\d+$/.test(v) ? `${v} ${v === '1' ? 'sucursal' : 'sucursales'} en León` : /León/i.test(v) ? v : `${v} en León`; };
 function ficha(id) {
   const m = D.marcas.find(x => x['#'] == id), L = D.listas;
   const kv = k => m[k] ? `<div class="kv"><b>${k}:</b> ${esc(m[k])}</div>` : '';
@@ -312,7 +313,7 @@ function ficha(id) {
   $('#sheet').hidden = false; $('#sheet').scrollTop = 0;
   $('#sheet').innerHTML = `<div><div class="top"><button class="b g" id="cl">← Volver</button><button class="b" id="sv">Guardar</button></div>
   <h2 style="margin:6px 0">${esc(m.Marca)} <span class="tag ${m.Prioridad}">${esc(m.Prioridad)}</span></h2>
-  <div class="mut">${esc(m.Giro)} · ${esc(m['Franquicia / tipo'])} · ${esc(m['Sucursales en León'])}</div>
+  <div class="mut">${[m.Giro, String(m['Franquicia / tipo'] || '').replace(/^Sí\s*-\s*/i, '').replace(/^./, c => c.toUpperCase()), sucLeon(m['Sucursales en León'])].filter(Boolean).map(esc).join(' · ')}</div>
   <div class="acts">${acciones(m)}</div>
   <div class="kv">${ajTag(ajuste(m))} <b>Short sugerido:</b> ${esc(m['Short sugerido'])}</div>
   <div class="seg">${[['seg', 'Seguimiento'], ['fic', 'Ficha'], ['suc', `Sucursales (${sucDe(m).length})`]].map(([k, t]) => `<button data-tab="${k}" class="${tabF === k ? 'on' : ''}">${t}</button>`).join('')}</div>
