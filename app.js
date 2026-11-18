@@ -58,7 +58,47 @@ const urls = s => String(s ?? '').match(/https?:\/\/[^\s|)]+/g) || [];
 const telDe = m => phones(m.WhatsApp)[0] || phones(m['Teléfono'])[0] || null;
 const mailDe = m => emails(m.Correo)[0] || emails(m['Contacto de franquicias'])[0] || null;
 const rellena = (t, m) => t.replace(/\{marca\}/g, m.Marca).replace(/\{giro\}/g, m.Giro || '').replace(/\{resp\}/g, CFG.yo || m.Responsable || 'el equipo');
-const msg = (m, k) => rellena(CFG.pl[k || (m.Estado === 'Sin contactar' ? 'ini' : 'seg')], m);
+// Mensajes personalizados que vienen en la sección "Mensajes" de la ficha de cada marca
+const _mc = {};
+function mensajesFicha(m) {
+  if (m.Marca in _mc) return _mc[m.Marca];
+  const sec = ((X.fichas[m.Marca] || {}).secciones || []).find(x => /^Mensajes/i.test(x.t));
+  let r = null;
+  if (sec && sec.md) {
+    const txt = sec.md.replace(/\*\*/g, '');
+    const re = /^[ \t\-*]*(WhatsApp inicial|WhatsApp|Correo|DM(?:\s+(?:Instagram|Facebook)(?:\/(?:Instagram|Facebook))?)?|Guion de llamada|Llamada|Seguimiento 1|Seguimiento 2)\b/gim;
+    const marks = []; let mm;
+    while ((mm = re.exec(txt))) marks.push({ k: mm[1].toLowerCase(), i: mm.index, len: mm[0].length });
+    r = {};
+    marks.forEach((mk, n) => {
+      const key = /^whatsapp/.test(mk.k) ? 'wa' : mk.k === 'correo' ? 'correo' : /^dm/.test(mk.k) ? 'dm' : /llamada/.test(mk.k) ? 'llamada' : mk.k.endsWith('1') ? 'seg1' : 'seg2';
+      if (r[key]) return;
+      let c = txt.slice(mk.i + mk.len, n + 1 < marks.length ? marks[n + 1].i : undefined);
+      const as = c.match(/Asunto:?[ \t]*["“]?([^\n"”]+)["”]?/i);
+      if (as) { r.asunto = r.asunto || as[1].trim(); c = c.replace(as[0], ''); }
+      c = c.replace(/^(?:[ \t]*\([^)]*\))+/, '').replace(/^[ \t]*[:.][ \t]*/, '').replace(/^(?:[ \t]*\([^)]*\))+[ \t]*[:.]?/, '').trim();
+      c = c.replace(/^["“]\s*/, '').replace(/\s*["”]$/, '').trim();
+      if (c.length >= 15) r[key] = c;
+    });
+    if (!Object.keys(r).length) r = null;
+  }
+  return (_mc[m.Marca] = r);
+}
+// Rellena [nombre] y quita el "[nombre]" del saludo; lo demás entre corchetes se deja para que se vea y se complete
+const limpia = (t, m) => t ? t.replace(/Hola\s*\[nombre\]\s*,/gi, 'Hola,').replace(/\[nombre[^\]]*\]/gi, CFG.yo || m.Responsable || 'el equipo') : t;
+const faltan = t => /\[[^\]]+\]/.test(t || '');
+function msg(m, k, via) {
+  const fm = mensajesFicha(m), clave = k || (m.Estado === 'Sin contactar' ? 'ini' : 'seg');
+  let t = null;
+  if (fm) {
+    if (clave === 'ini') t = via === 'mail' ? (fm.correo || fm.wa) : fm.wa;
+    else { const nb = D.bitacora.filter(x => x.Marca === m.Marca).length; t = (nb >= 2 ? fm.seg2 : fm.seg1) || fm.seg1 || fm.seg2; }
+  }
+  if (limpia(t, m)) return limpia(t, m);
+  const sg = sugiere(m);
+  return libMsg(m, via === 'mail' ? 'correo' : 'wa', clave === 'ini' ? 1 : Math.max(2, sg.toque), 0).txt || rellena(CFG.pl[clave], m);
+}
+const asuntoDe = m => { const fm = mensajesFicha(m); return m.Estado === 'Sin contactar' && fm && fm.asunto ? limpia(fm.asunto, m) : libMsg(m, 'correo', sugiere(m).toque, 0).asunto; };
 
 // Fija la próxima acción según el estado (respeta una fecha futura puesta a mano)
 function programa(m, force) {
@@ -82,8 +122,9 @@ function registra(m, canal, txt) {
   m._mod = Date.now(); persist();
 }
 // Envío con mensaje prellenado; al volver a la app se pregunta si se envió y se registra solo
-function enviar(m, via, texto, dest) {
-  const t = texto || msg(m);
+function enviar(m, via, texto, dest, asu) {
+  const t = texto || msg(m, null, via);
+  if (faltan(t) && !confirm('Este mensaje tiene datos por completar entre corchetes [ ]. ¿Enviarlo de todos modos?')) return;
   if (via === 'wa') {
     const p = dest || telDe(m); if (!p) return alert('Esta marca no tiene teléfono registrado.');
     localStorage.setItem(KEYP, JSON.stringify({ id: m['#'], canal: 'WhatsApp', txt: t }));
@@ -91,7 +132,7 @@ function enviar(m, via, texto, dest) {
   } else {
     const c = dest || mailDe(m); if (!c) return alert('Esta marca no tiene correo registrado.');
     localStorage.setItem(KEYP, JSON.stringify({ id: m['#'], canal: 'Correo', txt: t }));
-    location.href = `mailto:${c}?subject=${encodeURIComponent(rellena(CFG.pl.asu, m))}&body=${encodeURIComponent(t)}`;
+    location.href = `mailto:${c}?subject=${encodeURIComponent(asu || asuntoDe(m))}&body=${encodeURIComponent(t)}`;
   }
   pintaPend();
 }
@@ -306,6 +347,35 @@ function sucHtml(m) {
 // ---- ficha ----
 const sel = (arr, v) => `<option value=""></option>` + arr.map(x => `<option ${x === v ? 'selected' : ''}>${esc(x)}</option>`).join('');
 const sucLeon = v => { v = String(v ?? '').trim(); if (!v || /^n\/?d/i.test(v)) return ''; return /^\d+$/.test(v) ? `${v} ${v === '1' ? 'sucursal' : 'sucursales'} en León` : /León/i.test(v) ? v : `${v} en León`; };
+function mensajesCanal(m) {
+  const fm = mensajesFicha(m);
+  const it = [['wa', 'WhatsApp inicial'], ['correo', 'Correo'], ['dm', 'DM de Instagram / Facebook'], ['llamada', 'Guion de llamada'], ['seg1', 'Seguimiento 1'], ['seg2', 'Seguimiento 2']]
+    .filter(([k]) => fm[k]).map(([k, t]) => {
+      const x = limpia(fm[k], m);
+      return `<div class="quote"><b>${t}</b>${k === 'correo' && fm.asunto ? `<div class="mut">Asunto: ${esc(limpia(fm.asunto, m))}</div>` : ''}<div style="white-space:pre-wrap">${esc(x)}</div><button class="b g cp" data-t="${esc(x)}">Copiar</button></div>`;
+    });
+  return it.length ? `<details><summary>Mensajes por canal (de la ficha)</summary>${it.join('')}</details>` : '';
+}
+// ---- biblioteca de mensajes: segmento × canal × toque × variante ----
+const LB = { id: null, canal: 'wa', toque: 1, v: 0 };
+function lbInit(m) { if (LB.id !== m['#']) { const g = sugiere(m); Object.assign(LB, { id: m['#'], canal: g.canal, toque: g.toque, v: 0 }); } }
+function bibliotecaHtml(m) {
+  lbInit(m);
+  const cs = canalesDe(m);
+  return `<details id="lb" ${LB.open ? 'open' : ''}><summary>Mensajes sugeridos (${SEGN[segDe(m)]})</summary>
+  <div class="mut">Elige canal y toque; la app propone el que sigue según la bitácora y los datos de contacto de la ficha.</div>
+  <label>Canal</label><select id="lb-c">${Object.entries(CANALES).map(([k, t]) => `<option value="${k}" ${k === LB.canal ? 'selected' : ''}>${t}${cs.includes(k) ? (k === 'wa' && !String(m.WhatsApp ?? '').trim() ? ' (con el teléfono de la ficha)' : '') : ' (sin dato en la ficha)'}</option>`).join('')}</select>
+  <label>Toque</label><select id="lb-t">${[[1, '1 · Primer contacto'], [2, '2 · +3 días: video y pregunta'], [3, '3 · +7 días: la cifra'], [4, '4 · +14 días: cierre amable']].map(([k, t]) => `<option value="${k}" ${k === LB.toque ? 'selected' : ''}>${t}</option>`).join('')}</select>
+  <div id="lb-o"></div></details>`;
+}
+function lbPinta(m) {
+  const o = $('#lb-o'); if (!o) return;
+  const n = libVarN(LB.canal, m, LB.toque) || libVarN(LB.canal, m, 1);
+  const r = libMsg(m, LB.canal, LB.toque, LB.v);
+  o.innerHTML = `${LB.canal === 'correo' ? `<div class="mut">Asunto: ${esc(r.asunto)}</div>` : ''}<div class="quote" style="white-space:pre-wrap">${esc(r.txt)}</div>
+  <div class="acts">${n > 1 ? '<button class="b g" id="lb-v">Otra variante</button>' : ''}<button class="b g cp" data-t="${esc(r.txt)}">Copiar</button></div>
+  ${faltan(r.txt) ? '<div class="late">Completa los datos entre corchetes [ ] antes de enviarlo.</div>' : ''}`;
+}
 function ficha(id) {
   const m = D.marcas.find(x => x['#'] == id), L = D.listas;
   const kv = k => m[k] ? `<div class="kv"><b>${k}:</b> ${esc(m[k])}</div>` : '';
@@ -320,8 +390,11 @@ function ficha(id) {
   <div class="pn" data-p="fic" ${tabF === 'fic' ? '' : 'hidden'}>${fichaHtml(m)}</div>
   <div class="pn" data-p="suc" ${tabF === 'suc' ? '' : 'hidden'}>${sucHtml(m)}</div>
   <div class="pn" data-p="seg" ${tabF === 'seg' ? '' : 'hidden'}>
-  <h3>Mensaje sugerido</h3><textarea id="r-msg" rows="4">${esc(msg(m))}</textarea>
-  <div class="mut">Los botones WhatsApp / correo de arriba llevan este texto (puedes editarlo aquí). Al volver a la app te pregunto si lo enviaste y lo registro solo.</div>
+  <h3>Mensaje de WhatsApp</h3><textarea id="r-msg" rows="4">${esc(msg(m, null, 'wa'))}</textarea>
+  <div class="mut">${mensajesFicha(m) ? 'Texto tomado de la ficha de esta marca.' : 'Plantilla general: esta marca no trae mensajes en su ficha.'} El botón de WhatsApp lleva este texto (puedes editarlo aquí); el de correo usa el correo de la ficha. Al volver a la app te pregunto si lo enviaste y lo registro solo.</div>
+  ${faltan(msg(m, null, 'wa')) ? '<div class="late">Este mensaje tiene datos entre corchetes [ ] por completar antes de enviarlo.</div>' : ''}
+  ${mensajesFicha(m) ? mensajesCanal(m) : ''}
+  ${bibliotecaHtml(m)}
   <h3>Seguimiento</h3>
   <label>Estado</label><select id="f-est">${sel(L.Estado, m.Estado)}</select>
   <label>Prioridad</label><select id="f-pri">${sel(L.Prioridad, m.Prioridad)}</select>
@@ -345,6 +418,7 @@ function ficha(id) {
     m.Estado = $('#f-est').value || m.Estado; m.Prioridad = $('#f-pri').value || m.Prioridad; m.Responsable = $('#f-resp').value || null;
     m['Próxima acción'] = $('#f-pa').value || null; m['Fecha próxima acción'] = $('#f-fpa').value || null; m['Notas / resultado'] = $('#f-n').value || null;
   };
+  lbPinta(m);
   $('#cl').onclick = () => { $('#sheet').hidden = true; render(); };
   $('#sv').onclick = () => { leer(); m._mod = Date.now(); persist(); $('#sheet').hidden = true; render(); };
   $('#rg').onclick = () => {
@@ -404,11 +478,18 @@ function ajustes() {
   $('#rst').onclick = async () => { if (confirm('Se borra TODO lo capturado y vuelve el Excel original. ¿Seguro?')) { localStorage.removeItem(KEY); localStorage.removeItem(KEYX); D = await store.load(); await cargaExtra(); if (D) render(); else location.reload(); } };
 }
 
+document.addEventListener('change', e => {
+  if (!e.target.closest('#lb')) return;
+  const m = D.marcas.find(x => x['#'] == LB.id); if (!m) return;
+  if (e.target.id === 'lb-c') LB.canal = e.target.value; if (e.target.id === 'lb-t') LB.toque = +e.target.value; LB.v = 0; LB.open = true; lbPinta(m);
+});
 document.addEventListener('click', e => {
+  if (e.target.id === 'lb-v') { const m = D.marcas.find(x => x['#'] == LB.id); LB.v++; return lbPinta(m); }
+  if (e.target.closest('#lb summary')) { LB.open = !$('#lb').open; setTimeout(() => lbPinta(D.marcas.find(x => x['#'] == LB.id)), 0); }
   const sd = e.target.closest('[data-send]');
   if (sd) {
     e.preventDefault(); const m = D.marcas.find(x => x['#'] == sd.dataset.id), ta = $('#r-msg');
-    return m && enviar(m, sd.dataset.send, !$('#sheet').hidden && ta ? ta.value : null, sd.dataset.p);
+    return m && enviar(m, sd.dataset.send, sd.dataset.send === 'wa' && !$('#sheet').hidden && ta ? ta.value : null, sd.dataset.p);
   }
   const pd = e.target.closest('[data-pend]');
   if (pd) {
