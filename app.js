@@ -328,7 +328,8 @@ function ficha(id) {
   <label>Próxima acción</label><input id="f-pa" value="${esc(m['Próxima acción'])}">
   <label>Fecha próxima acción</label><input type="date" id="f-fpa" value="${esc(m['Fecha próxima acción'])}">
   <label>Notas</label><textarea id="f-n" rows="4">${esc(m['Notas / resultado'])}</textarea>
-  <h3>Registrar contacto</h3>
+  <h3>Anotar otro contacto o la respuesta</h3>
+  <p class="mut">Si acabas de mandar un WhatsApp o correo desde la app, ya quedó registrado solo. Usa esto únicamente para algo distinto: una llamada, una visita o lo que te contestaron.</p>
   <label>Canal</label><select id="r-can">${sel(L.Canal, '')}</select>
   <label>Qué se hizo / qué dijeron</label><textarea id="r-txt" rows="3"></textarea>
   <button class="b" id="rg" style="margin-top:8px">Registrar en bitácora</button>
@@ -412,7 +413,9 @@ document.addEventListener('click', e => {
   if (pd) {
     const p = pendiente(); localStorage.removeItem(KEYP); const m = p && D.marcas.find(x => x['#'] == p.id);
     if (pd.dataset.pend === 'si' && m) registra(m, p.canal, 'Mensaje enviado: ' + p.txt);
-    pintaPend(); if ($('#sheet').hidden) render(); else if (m) ficha(m['#']); return;
+    pintaPend(); if ($('#sheet').hidden) render(); else if (m) ficha(m['#']);
+    if (pd.dataset.pend === 'si' && m) { const t = $('#pend'); t.hidden = false; t.innerHTML = '<span>✓ Registrado en la bitácora: ' + esc(m.Marca) + '</span>'; setTimeout(() => pintaPend(), 2500); }
+    return;
   }
   const sn = e.target.closest('.sn');
   if (sn) { const m = D.marcas.find(x => x['#'] == sn.dataset.id); m['Fecha próxima acción'] = addDays(+sn.dataset.d); m._mod = Date.now(); persist(); return render(); }
